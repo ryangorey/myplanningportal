@@ -8,6 +8,7 @@ import { getAvailability, createBooking, listBookings, getBooking, updateBooking
 import { requestLink, verifyLink, logoutCustomer, getMe, getMyBookings } from "./customer-auth.js";
 import { setupPage, submitSetup } from "./setup.js";
 import { createPayment } from "./payments.js";
+import { saveSelection } from "./selections.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -269,6 +270,12 @@ export default {
       // the staff-auth gate below.
       if (request.method === "POST" && id && subresource === "pay") {
         return addCors(await createPayment(request, env, id, json));
+      }
+
+      // Same story for saving a backdrop/template pick -- the customer's
+      // own action on their own booking, not a staff one.
+      if (request.method === "POST" && id && subresource === "selection") {
+        return addCors(await saveSelection(request, env, id, json));
       }
 
       const auth = await requireStaffAdmin(request, env);
