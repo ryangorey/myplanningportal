@@ -1,10 +1,17 @@
-// Customer authentication via magic link -- no passwords. A customer enters
-// their email, gets a one-time link, clicking it logs them in. Simpler and
-// safer than passwords for an app people open twice for one event.
+// Customer authentication -- real accounts with email + password. Sign up
+// once (confirming email ownership via a one-time link, same as before),
+// then log in with a password every time after -- no more waiting on an
+// email for routine sign-ins. Password hashing reuses the exact PBKDF2
+// helpers auth.js already built for staff, so there's one implementation
+// of "hash a password" in the whole app, not two.
 
-const LINK_TTL_MINUTES = 15;
-const SESSION_TTL_DAYS = 30; // longer than staff -- customers shouldn't get logged out mid-planning
-const RESEND_COOLDOWN_SECONDS = 60; // don't let someone spam an inbox with links
+import { hashPassword, verifyPassword } from "./auth.js";
+
+const VERIFY_TTL_MINUTES = 60 * 24; // 24 hours -- this is a one-time signup
+// confirmation, not a routine login link, so it can be more generous than
+// the old magic link's window was.
+const SESSION_TTL_DAYS = 30; // customers shouldn't get logged out mid-planning
+const RESEND_COOLDOWN_SECONDS = 60; // don't let someone spam an inbox
 
 function bytesToHex(bytes) {
   return Array.from(bytes)
@@ -39,12 +46,11 @@ function bearerToken(request) {
 // one function out if you'd rather use Postmark/SendGrid/Mailgun, nothing
 // else in this file needs to change. Needs env.RESEND_API_KEY (a secret)
 // and env.EMAIL_FROM (e.g. "myplanningportal <login@myplanningportal.com>").
+// Only used at signup time now, for the one-time "confirm your email" step
+// -- routine logins never touch this.
 // ---------------------------------------------------------------------------
 async function sendEmail(env, { to, subject, html }) {
   if (!env.RESEND_API_KEY) {
-    // Not configured yet -- log instead of throwing, so the rest of the
-    // flow (token creation) still works and is testable before email is
-    // wired up. Remove this fallback once RESEND_API_KEY is set.
     console.log(`[email not configured] would send to ${to}: ${subject}`);
     return { skipped: true };
   }
@@ -63,75 +69,87 @@ async function sendEmail(env, { to, subject, html }) {
   return { skipped: false };
 }
 
-function magicLinkEmailHtml(link) {
-  return `<p>Tap the link below to sign in. It expires in ${LINK_TTL_MINUTES} minutes and works once.</p>
+function verifyEmailHtml(link) {
+  return `<p>Tap the link below to confirm your email and finish creating your account. It expires in 24 hours and works once.</p>
 <p><a href="${link}">${link}</a></p>
-<p>If you didn't request this, you can ignore this email.</p>`;
+<p>If you didn't create an account, you can ignore this email.</p>`;
 }
 
-async function getOrCreateCustomerByEmail(env, email, extra = {}) {
-  const normalized = email.toLowerCase().trim();
-  const existing = await env.DB.prepare("SELECT id FROM customers WHERE email = ?").bind(normalized).first();
-  if (existing) return existing.id;
-  const result = await env.DB.prepare(
-    "INSERT INTO customers (email, phone, first_name, last_name) VALUES (?, ?, ?, ?)"
-  )
-    .bind(normalized, extra.phone ?? null, extra.first_name ?? null, extra.last_name ?? null)
-    .run();
-  return result.meta.last_row_id;
-}
-
-// POST /api/auth/customer/request-link  { email, portal_url }
-// Always responds with a generic success message, whether or not the email
-// is one we recognize -- this avoids leaking which emails have accounts.
-async function requestLink(request, env, json) {
-  const body = await request.json().catch(() => null);
-  if (!body || !body.email) {
-    return json({ error: "Email is required." }, 400);
-  }
-  const email = body.email.toLowerCase().trim();
-  const genericResponse = { message: "If that email has an account, a login link is on its way." };
-
-  const customerId = await getOrCreateCustomerByEmail(env, email);
-
-  // Cooldown: if there's a recent unused token, don't mint another / don't
-  // send another email. Still return the generic success message either way.
-  const recent = await env.DB.prepare(
-    `SELECT token FROM customer_login_tokens
-     WHERE customer_id = ? AND used = 0 AND created_at > datetime('now', ?)
-     ORDER BY created_at DESC LIMIT 1`
-  )
-    .bind(customerId, `-${RESEND_COOLDOWN_SECONDS} seconds`)
-    .first();
-  if (recent) {
-    return json(genericResponse);
-  }
-
+async function sendVerificationEmail(env, customerId, email, portalUrl) {
   const token = newToken();
   await env.DB.prepare(
     "INSERT INTO customer_login_tokens (token, customer_id, expires_at) VALUES (?, ?, ?)"
   )
-    .bind(token, customerId, minutesFromNow(LINK_TTL_MINUTES))
+    .bind(token, customerId, minutesFromNow(VERIFY_TTL_MINUTES))
     .run();
 
-  const portalUrl = body.portal_url || "https://myplanningportal.com";
-  const link = `${portalUrl.replace(/\/$/, "")}/auth/verify?token=${token}`;
+  const base = (portalUrl || "https://myplanningportal.com").replace(/\/$/, "");
+  const link = `${base}/verify-email.html?token=${token}`;
 
   await sendEmail(env, {
     to: email,
-    subject: "Your sign-in link",
-    html: magicLinkEmailHtml(link),
+    subject: "Confirm your account",
+    html: verifyEmailHtml(link),
   });
-
-  return json(genericResponse);
 }
 
-// POST /api/auth/customer/verify  { token } -> { token: sessionToken, customer }
-async function verifyLink(request, env, json) {
+// POST /api/auth/customer-signup  { email, password, first_name?, last_name?, phone?, portal_url }
+// If a customer row already exists for this email (created earlier by a
+// booking or by staff, never claimed with a password) this "claims" it
+// instead of erroring -- that's the normal path for most real signups here,
+// since a booking usually happens before someone bothers making an account.
+async function signup(request, env, json) {
   const body = await request.json().catch(() => null);
-  if (!body || !body.token) {
-    return json({ error: "Token is required." }, 400);
+  if (!body || !body.email || !body.password) {
+    return json({ error: "Email and password are required." }, 400);
   }
+  if (body.password.length < 8) {
+    return json({ error: "Password needs to be at least 8 characters." }, 400);
+  }
+
+  const email = body.email.toLowerCase().trim();
+  const passwordHash = await hashPassword(body.password);
+
+  const existing = await env.DB.prepare(
+    "SELECT id, password_hash FROM customers WHERE email = ?"
+  )
+    .bind(email)
+    .first();
+
+  let customerId;
+  if (existing) {
+    if (existing.password_hash) {
+      return json({ error: "An account with that email already exists. Try signing in instead." }, 409);
+    }
+    await env.DB.prepare(
+      `UPDATE customers SET password_hash = ?, email_verified = 0,
+              first_name = COALESCE(first_name, ?), last_name = COALESCE(last_name, ?), phone = COALESCE(phone, ?)
+       WHERE id = ?`
+    )
+      .bind(passwordHash, body.first_name ?? null, body.last_name ?? null, body.phone ?? null, existing.id)
+      .run();
+    customerId = existing.id;
+  } else {
+    const result = await env.DB.prepare(
+      "INSERT INTO customers (email, password_hash, first_name, last_name, phone, email_verified) VALUES (?, ?, ?, ?, ?, 0)"
+    )
+      .bind(email, passwordHash, body.first_name ?? null, body.last_name ?? null, body.phone ?? null)
+      .run();
+    customerId = result.meta.last_row_id;
+  }
+
+  await sendVerificationEmail(env, customerId, email, body.portal_url);
+
+  return json({ message: "Check your email to confirm your account, then you can sign in." }, 201);
+}
+
+// POST /api/auth/customer-verify-email  { token } -> { token: sessionToken, customer }
+// Confirms the email AND logs the customer straight in -- clicking the link
+// already proves they own the inbox, no reason to make them log in again
+// right after.
+async function verifyEmail(request, env, json) {
+  const body = await request.json().catch(() => null);
+  if (!body || !body.token) return json({ error: "Token is required." }, 400);
 
   const row = await env.DB.prepare(
     `SELECT clt.customer_id, clt.expires_at, clt.used, c.email, c.first_name, c.last_name
@@ -143,12 +161,13 @@ async function verifyLink(request, env, json) {
     .first();
 
   if (!row) return json({ error: "That link isn't valid. Request a new one." }, 401);
-  if (row.used) return json({ error: "That link has already been used. Request a new one." }, 401);
+  if (row.used) return json({ error: "That link has already been used." }, 401);
   if (new Date(row.expires_at) < new Date()) {
     return json({ error: "That link has expired. Request a new one." }, 401);
   }
 
   await env.DB.prepare("UPDATE customer_login_tokens SET used = 1 WHERE token = ?").bind(body.token).run();
+  await env.DB.prepare("UPDATE customers SET email_verified = 1 WHERE id = ?").bind(row.customer_id).run();
 
   const sessionToken = newToken();
   await env.DB.prepare(
@@ -163,7 +182,78 @@ async function verifyLink(request, env, json) {
   });
 }
 
-// POST /api/auth/customer/logout
+// POST /api/auth/customer-resend-verification  { email, portal_url }
+// Always responds with a generic message, whether or not the email has a
+// pending (unverified) account -- avoids leaking who's signed up.
+async function resendVerification(request, env, json) {
+  const body = await request.json().catch(() => null);
+  if (!body || !body.email) return json({ error: "Email is required." }, 400);
+
+  const email = body.email.toLowerCase().trim();
+  const genericResponse = { message: "If that email has a pending account, a confirmation link is on its way." };
+
+  const row = await env.DB.prepare(
+    "SELECT id, email_verified FROM customers WHERE email = ? AND password_hash IS NOT NULL"
+  )
+    .bind(email)
+    .first();
+  if (!row || row.email_verified) return json(genericResponse);
+
+  const recent = await env.DB.prepare(
+    `SELECT token FROM customer_login_tokens
+     WHERE customer_id = ? AND used = 0 AND created_at > datetime('now', ?)
+     ORDER BY created_at DESC LIMIT 1`
+  )
+    .bind(row.id, `-${RESEND_COOLDOWN_SECONDS} seconds`)
+    .first();
+  if (recent) return json(genericResponse);
+
+  await sendVerificationEmail(env, row.id, email, body.portal_url);
+  return json(genericResponse);
+}
+
+// POST /api/auth/customer-login  { email, password } -> { token, customer }
+async function login(request, env, json) {
+  const body = await request.json().catch(() => null);
+  if (!body || !body.email || !body.password) {
+    return json({ error: "Email and password are required." }, 400);
+  }
+  const email = body.email.toLowerCase().trim();
+
+  const row = await env.DB.prepare(
+    "SELECT id, email, password_hash, first_name, last_name, email_verified FROM customers WHERE email = ?"
+  )
+    .bind(email)
+    .first();
+
+  // Same generic message whether the email doesn't exist, has no password
+  // set yet (never signed up), or the password's just wrong -- don't leak
+  // which case it is.
+  if (!row || !row.password_hash) {
+    return json({ error: "That email or password isn't right." }, 401);
+  }
+  const valid = await verifyPassword(body.password, row.password_hash);
+  if (!valid) {
+    return json({ error: "That email or password isn't right." }, 401);
+  }
+  if (!row.email_verified) {
+    return json({ error: "Confirm your email before signing in -- check your inbox, or request a new link." }, 403);
+  }
+
+  const sessionToken = newToken();
+  await env.DB.prepare(
+    "INSERT INTO customer_sessions (token, customer_id, expires_at) VALUES (?, ?, ?)"
+  )
+    .bind(sessionToken, row.id, daysFromNow(SESSION_TTL_DAYS))
+    .run();
+
+  return json({
+    token: sessionToken,
+    customer: { id: row.id, email: row.email, first_name: row.first_name, last_name: row.last_name },
+  });
+}
+
+// POST /api/auth/customer-logout
 async function logoutCustomer(request, env, json) {
   const token = bearerToken(request);
   if (token) {
@@ -175,6 +265,8 @@ async function logoutCustomer(request, env, json) {
 // Looks up the logged-in customer for a request, or null. Mirrors
 // getSessionStaff in auth.js but reads customer_sessions instead, so a
 // customer token can never accidentally pass a staff check or vice versa.
+// Unchanged by the switch to password auth -- a session is a session
+// regardless of how it was created.
 async function getSessionCustomer(request, env) {
   const token = bearerToken(request);
   if (!token) return null;
@@ -227,4 +319,13 @@ async function getMyBookings(request, env, json) {
   return json(results);
 }
 
-export { requestLink, verifyLink, logoutCustomer, getSessionCustomer, getMe, getMyBookings };
+export {
+  signup,
+  login,
+  verifyEmail,
+  resendVerification,
+  logoutCustomer,
+  getSessionCustomer,
+  getMe,
+  getMyBookings,
+};
