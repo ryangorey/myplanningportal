@@ -5,7 +5,7 @@
 
 import { login, logout, getSessionStaff, getMyStaffAccount, updateMyStaffAccount, roleAtLeast } from "./auth.js";
 import { getAvailability, createBooking, listBookings, getBooking, updateBooking } from "./bookings.js";
-import { requestLink, verifyLink, logoutCustomer, getMe, getMyBookings } from "./customer-auth.js";
+import { signup, login as customerLogin, verifyEmail, resendVerification, logoutCustomer, getMe, getMyBookings } from "./customer-auth.js";
 import { setupPage, submitSetup } from "./setup.js";
 import { createPayment } from "./payments.js";
 import { saveSelection } from "./selections.js";
@@ -308,8 +308,10 @@ export default {
     if (resource === "auth") {
       if (request.method === "POST" && id === "login") return addCors(await login(request, env, json));
       if (request.method === "POST" && id === "logout") return addCors(await logout(request, env, json));
-      if (request.method === "POST" && id === "customer-login") return addCors(await requestLink(request, env, json));
-      if (request.method === "POST" && id === "customer-verify") return addCors(await verifyLink(request, env, json));
+      if (request.method === "POST" && id === "customer-signup") return addCors(await signup(request, env, json));
+      if (request.method === "POST" && id === "customer-login") return addCors(await customerLogin(request, env, json));
+      if (request.method === "POST" && id === "customer-verify-email") return addCors(await verifyEmail(request, env, json));
+      if (request.method === "POST" && id === "customer-resend-verification") return addCors(await resendVerification(request, env, json));
       if (request.method === "POST" && id === "customer-logout") return addCors(await logoutCustomer(request, env, json));
       return addCors(json({ error: "Not found." }, 404));
     }
