@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signing you in | myplanningportal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../portal-styles.css">
+</head>
+<body>
+
+<div class="portal-page">
+  <img class="portal-logo" src="https://raw.githubusercontent.com/ryangorey/RGMLlogo/102e74830a7fd89dca2451699469c742463da962/my_planning_portal_logo_dark_bg_small.png" alt="myplanningportal">
+
+  <div class="portal-card">
+    <h1 id="heading">Signing you in</h1>
+    <p class="portal-sub" id="subtext">One moment...</p>
+
+    <div id="status" class="portal-status"></div>
+
+    <a href="/login.html" class="btn-secondary" id="back-link" style="display:none;text-decoration:none;text-align:center;line-height:40px;">Back to sign in</a>
+  </div>
+</div>
+
+<script src="../../portal-config.js"></script>
+<script>
+  const status = document.getElementById("status");
+  const heading = document.getElementById("heading");
+  const subtext = document.getElementById("subtext");
+  const backLink = document.getElementById("back-link");
+
+  function showError(message) {
+    heading.textContent = "That link didn't work";
+    subtext.textContent = "";
+    status.textContent = message;
+    status.className = "portal-status show error";
+    backLink.style.display = "block";
+  }
+
+  function showSuccess() {
+    heading.textContent = "You're in";
+    subtext.textContent = "Redirecting to your bookings...";
+  }
+
+  (async function () {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+
+    if (!token) {
+      showError("This link is missing its sign-in token. Request a new one.");
+      return;
+    }
+
+    try {
+      const resp = await fetch(API_BASE_URL + "/api/auth/customer-verify", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: token })
+      });
+
+      const data = await resp.json().catch(function () { return null; });
+
+      if (!resp.ok) {
+        showError((data && data.error) || "That link isn't valid. Request a new one.");
+        return;
+      }
+
+      localStorage.setItem("mpp_session", JSON.stringify({
+        token: data.token,
+        customer: data.customer
+      }));
+
+      showSuccess();
+      window.location.replace("/dashboard.html");
+    } catch (err) {
+      showError("Couldn't reach the server. Check your connection and try again.");
+    }
+  })();
+</script>
+
+</body>
+</html>
