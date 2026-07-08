@@ -5,4 +5,4 @@ compatibility_date = "2025-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "myplanningportal-db"
-database_id = "PASTE_THE_ID_HERE_ONCE_YOU_RUN_D1_CREATE"
+database_id = "d4ada005-8201-470f-abd4-d8824be192ddE"
