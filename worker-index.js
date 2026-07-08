@@ -3,12 +3,13 @@
 // instead of anyone ever touching SQL directly), plus staff login/session
 // auth from auth.js protecting the write routes.
 
-import { login, logout, getSessionStaff } from "./auth.js";
+import { login, logout, getSessionStaff, getMyStaffAccount, updateMyStaffAccount } from "./auth.js";
 import { getAvailability, createBooking, listBookings, getBooking, updateBooking } from "./bookings.js";
 import { requestLink, verifyLink, logoutCustomer, getMe, getMyBookings } from "./customer-auth.js";
 import { setupPage, submitSetup } from "./setup.js";
 import { createPayment } from "./payments.js";
 import { saveSelection } from "./selections.js";
+import { listCustomers, getCustomer, createCustomer, updateCustomer } from "./customers.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -96,6 +97,78 @@ async function deactivateEquipment(env, id) {
 }
 
 // ---------------------------------------------------------------------------
+// Venues
+// ---------------------------------------------------------------------------
+
+async function listVenues(env, url) {
+  const includeInactive = url.searchParams.get("include_inactive") === "1";
+  let query = "SELECT id, name, address, city, state, zip, contact_name, contact_phone, contact_email, notes, is_active FROM venues";
+  if (!includeInactive) query += " WHERE is_active = 1";
+  query += " ORDER BY name";
+  const { results } = await env.DB.prepare(query).all();
+  return json(results);
+}
+
+async function createVenue(request, env) {
+  const body = await readJson(request);
+  if (!body || !body.name) {
+    return json({ error: "name is required." }, 400);
+  }
+  const result = await env.DB.prepare(
+    `INSERT INTO venues (name, address, city, state, zip, contact_name, contact_phone, contact_email, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      body.name,
+      body.address ?? null,
+      body.city ?? null,
+      body.state ?? null,
+      body.zip ?? null,
+      body.contact_name ?? null,
+      body.contact_phone ?? null,
+      body.contact_email ?? null,
+      body.notes ?? null
+    )
+    .run();
+  return json({ id: result.meta.last_row_id, ...body }, 201);
+}
+
+async function updateVenue(request, env, id) {
+  const body = await readJson(request);
+  if (!body) return json({ error: "Invalid request body." }, 400);
+  const fields = [];
+  const values = [];
+  for (const key of [
+    "name",
+    "address",
+    "city",
+    "state",
+    "zip",
+    "contact_name",
+    "contact_phone",
+    "contact_email",
+    "notes",
+    "is_active",
+  ]) {
+    if (key in body) {
+      fields.push(`${key} = ?`);
+      values.push(body[key]);
+    }
+  }
+  if (fields.length === 0) return json({ error: "Nothing to update." }, 400);
+  values.push(id);
+  await env.DB.prepare(`UPDATE venues SET ${fields.join(", ")} WHERE id = ?`)
+    .bind(...values)
+    .run();
+  return json({ id: Number(id), ...body });
+}
+
+async function deactivateVenue(env, id) {
+  await env.DB.prepare("UPDATE venues SET is_active = 0 WHERE id = ?").bind(id).run();
+  return json({ id: Number(id), is_active: 0 });
+}
+
+// ---------------------------------------------------------------------------
 // Brands
 // ---------------------------------------------------------------------------
 
@@ -114,14 +187,24 @@ async function listBrands(env) {
 
 async function listPackages(env, url) {
   const brandSlug = url.searchParams.get("brand");
+  const includeInactive = url.searchParams.get("include_inactive") === "1";
+
   let query = `SELECT p.id, p.brand_id, b.slug AS brand_slug, p.name, p.category,
-                      p.price, p.duration_hours, p.description, p.is_active
+                      p.price, p.duration_hours, p.description, p.is_active,
+                      p.booth_type, p.allow_backdrop_selection, p.allow_template_selection
                FROM packages p
                LEFT JOIN brands b ON b.id = p.brand_id`;
+  const conditions = [];
   const params = [];
   if (brandSlug) {
-    query += " WHERE b.slug = ? OR p.brand_id IS NULL";
+    conditions.push("(b.slug = ? OR p.brand_id IS NULL)");
     params.push(brandSlug);
+  }
+  if (!includeInactive) {
+    conditions.push("p.is_active = 1");
+  }
+  if (conditions.length) {
+    query += " WHERE " + conditions.join(" AND ");
   }
   query += " ORDER BY p.category, p.name";
   const { results } = await env.DB.prepare(query).bind(...params).all();
@@ -134,8 +217,9 @@ async function createPackage(request, env) {
     return json({ error: "name and price are required." }, 400);
   }
   const result = await env.DB.prepare(
-    `INSERT INTO packages (brand_id, name, category, price, duration_hours, description)
-     VALUES (?, ?, ?, ?, ?, ?)`
+    `INSERT INTO packages (brand_id, name, category, price, duration_hours, description,
+                            booth_type, allow_backdrop_selection, allow_template_selection)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       body.brand_id ?? null,
@@ -143,7 +227,10 @@ async function createPackage(request, env) {
       body.category ?? null,
       body.price,
       body.duration_hours ?? null,
-      body.description ?? null
+      body.description ?? null,
+      body.booth_type ?? null,
+      body.allow_backdrop_selection ?? 1,
+      body.allow_template_selection ?? 1
     )
     .run();
   return json({ id: result.meta.last_row_id, ...body }, 201);
@@ -162,6 +249,9 @@ async function updatePackage(request, env, id) {
     "duration_hours",
     "description",
     "is_active",
+    "booth_type",
+    "allow_backdrop_selection",
+    "allow_template_selection",
   ]) {
     if (key in body) {
       fields.push(`${key} = ?`);
@@ -231,6 +321,36 @@ export default {
     if (resource === "brands") {
       if (request.method === "GET" && !id) return addCors(await listBrands(env));
       return addCors(json({ error: "Not found." }, 404));
+    }
+
+    // Staff's own account -- name/email/password, distinct from any
+    // particular staff_id so a staff member can only ever edit themselves.
+    if (resource === "staff" && id === "me") {
+      if (request.method === "GET") return addCors(await getMyStaffAccount(request, env, json));
+      if (request.method === "PATCH") return addCors(await updateMyStaffAccount(request, env, json));
+      return addCors(json({ error: "Not found." }, 404));
+    }
+
+    // Clients: staff-only, for saving/reusing contact info across bookings.
+    if (resource === "customers") {
+      const auth = await requireStaffAdmin(request, env);
+      if (auth.error) return addCors(auth.error);
+      if (request.method === "GET" && !id) return addCors(await listCustomers(env, url, json));
+      if (request.method === "GET" && id) return addCors(await getCustomer(env, id, json));
+      if (request.method === "POST" && !id) return addCors(await createCustomer(request, env, json));
+      if (request.method === "PATCH" && id) return addCors(await updateCustomer(request, env, id, json));
+      return addCors(json({ error: "Not found." }, 404));
+    }
+
+    // Venues: public read (booking forms on the marketing sites may want to
+    // show a venue list someday), writes are staff-only.
+    if (resource === "venues") {
+      if (request.method === "GET" && !id) return addCors(await listVenues(env, url));
+      const auth = await requireStaffAdmin(request, env);
+      if (auth.error) return addCors(auth.error);
+      if (request.method === "POST" && !id) return addCors(await createVenue(request, env));
+      if (request.method === "PATCH" && id) return addCors(await updateVenue(request, env, id));
+      if (request.method === "DELETE" && id) return addCors(await deactivateVenue(env, id));
     }
 
     // Reads are open (customer-facing screens need to see the catalog).
