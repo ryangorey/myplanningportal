@@ -212,6 +212,8 @@ async function getMyBookings(request, env, json) {
   const { results } = await env.DB.prepare(
     `SELECT b.id, b.event_date, b.event_type, b.status, b.package_total, b.deposit_paid,
             b.allow_full_payment, b.allow_retainer_payment, b.allow_custom_payment,
+            b.allow_backdrop_selection, b.allow_template_selection, b.booth_type,
+            b.backdrop_choice, b.template_choice,
             br.slug AS brand_slug, br.display_name AS brand_name, p.name AS package_name
      FROM bookings b
      JOIN brands br ON br.id = b.brand_id
