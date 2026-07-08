@@ -11,6 +11,7 @@ import { createPayment } from "./payments.js";
 import { saveSelection } from "./selections.js";
 import { listCustomers, getCustomer, createCustomer, updateCustomer } from "./customers.js";
 import { listStaff, createStaff, updateStaff, deactivateStaff } from "./staff.js";
+import { updateBrand, uploadBrandLogo, serveUpload } from "./branding.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -174,11 +175,12 @@ async function deactivateVenue(env, id) {
 // Brands
 // ---------------------------------------------------------------------------
 
-// GET /api/brands -- public read, just id/slug/display_name. Lets admin
-// screens populate a real brand dropdown instead of guessing brand_id numbers.
+// GET /api/brands -- public read. Includes logo_url/primary_color so both
+// the admin topbar and the customer portal can render branding without a
+// separate staff-only lookup -- none of this is sensitive data.
 async function listBrands(env) {
   const { results } = await env.DB.prepare(
-    "SELECT id, slug, display_name, portal_domain FROM brands ORDER BY id"
+    "SELECT id, slug, display_name, portal_domain, logo_url, primary_color FROM brands ORDER BY id"
   ).all();
   return json(results);
 }
@@ -319,9 +321,27 @@ export default {
       return addCors(json({ error: "Not found." }, 404));
     }
 
-    // Brands: public read-only, used by admin screens for dropdowns.
+    // Brands: public read (used by admin screens for dropdowns, and by the
+    // customer portal for branding). Editing name/color and uploading a
+    // logo are admin+ only.
     if (resource === "brands") {
       if (request.method === "GET" && !id) return addCors(await listBrands(env));
+      if (id && subresource === "logo" && request.method === "POST") {
+        const auth = await requireStaffAdmin(request, env, "admin");
+        if (auth.error) return addCors(auth.error);
+        return addCors(await uploadBrandLogo(request, env, id, json));
+      }
+      if (id && !subresource && request.method === "PATCH") {
+        const auth = await requireStaffAdmin(request, env, "admin");
+        if (auth.error) return addCors(auth.error);
+        return addCors(await updateBrand(request, env, id, json));
+      }
+      return addCors(json({ error: "Not found." }, 404));
+    }
+
+    // Uploaded logo images: public read, served straight out of R2.
+    if (resource === "uploads" && id) {
+      if (request.method === "GET") return addCors(await serveUpload(env, id));
       return addCors(json({ error: "Not found." }, 404));
     }
 
