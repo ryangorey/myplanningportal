@@ -1,8 +1,23 @@
 name = "myplanningportal-api"
 main = "worker-index.js"
 compatibility_date = "2025-01-01"
- 
+
+# Without this, every `wrangler deploy` (including the automatic ones
+# triggered by pushing to GitHub) wipes out any plain-text Variables you've
+# set in the Cloudflare dashboard -- e.g. EMAIL_FROM, SQUARE_LOCATION_ID,
+# SQUARE_ENVIRONMENT -- because Wrangler treats this file's [vars] block (or
+# lack of one) as authoritative. keep_vars = true tells it to leave your
+# dashboard-set variables alone on deploy.
+keep_vars = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "myplanningportal-db"
 database_id = "d4ada005-8201-470f-abd4-d8824be192dd"
+
+# Stores uploaded brand logos. Create this bucket first in the Cloudflare
+# dashboard (R2 -> Create bucket -> name it exactly "myplanningportal-logos"),
+# THEN deploy this file -- deploying before the bucket exists will fail.
+[[r2_buckets]]
+binding = "LOGOS"
+bucket_name = "myplanningportal-logos"
