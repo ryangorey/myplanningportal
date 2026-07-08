@@ -141,4 +141,78 @@ async function getSessionStaff(request, env) {
   return row;
 }
 
-export { hashPassword, verifyPassword, login, logout, getSessionStaff, bearerToken };
+// GET /api/staff/me -- the logged-in staff member's own account info.
+async function getMyStaffAccount(request, env, json) {
+  const staffRow = await getSessionStaff(request, env);
+  if (!staffRow) return json({ error: "Sign in required." }, 401);
+  return json({
+    id: staffRow.id,
+    email: staffRow.email,
+    first_name: staffRow.first_name,
+    last_name: staffRow.last_name,
+    role: staffRow.role,
+  });
+}
+
+// PATCH /api/staff/me  { first_name?, last_name?, email?, current_password?, new_password? }
+// Changing the password requires current_password to check out against
+// what's on file -- name/email can be changed freely.
+async function updateMyStaffAccount(request, env, json) {
+  const staffRow = await getSessionStaff(request, env);
+  if (!staffRow) return json({ error: "Sign in required." }, 401);
+
+  const body = await request.json().catch(() => null);
+  if (!body) return json({ error: "Invalid request body." }, 400);
+
+  const fields = [];
+  const values = [];
+
+  for (const key of ["first_name", "last_name"]) {
+    if (key in body) {
+      fields.push(`${key} = ?`);
+      values.push(body[key]);
+    }
+  }
+  if ("email" in body && body.email) {
+    fields.push("email = ?");
+    values.push(body.email.toLowerCase().trim());
+  }
+
+  if (body.new_password) {
+    if (!body.current_password) {
+      return json({ error: "Enter your current password to set a new one." }, 400);
+    }
+    const fullStaffRow = await env.DB.prepare("SELECT password_hash FROM staff WHERE id = ?")
+      .bind(staffRow.id)
+      .first();
+    const valid = await verifyPassword(body.current_password, fullStaffRow.password_hash);
+    if (!valid) {
+      return json({ error: "Your current password isn't right." }, 401);
+    }
+    if (body.new_password.length < 8) {
+      return json({ error: "New password needs to be at least 8 characters." }, 400);
+    }
+    fields.push("password_hash = ?");
+    values.push(await hashPassword(body.new_password));
+  }
+
+  if (fields.length === 0) return json({ error: "Nothing to update." }, 400);
+  values.push(staffRow.id);
+
+  await env.DB.prepare(`UPDATE staff SET ${fields.join(", ")} WHERE id = ?`)
+    .bind(...values)
+    .run();
+
+  return json({ ok: true });
+}
+
+export {
+  hashPassword,
+  verifyPassword,
+  login,
+  logout,
+  getSessionStaff,
+  bearerToken,
+  getMyStaffAccount,
+  updateMyStaffAccount,
+};
