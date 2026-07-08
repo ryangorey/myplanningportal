@@ -5,6 +5,16 @@
 const SESSION_TTL_DAYS = 7;
 const PBKDF2_ITERATIONS = 100000;
 
+// Role hierarchy, lowest to highest. Used by requireStaffAdmin(request, env,
+// minRole) in worker-index.js to gate routes, and by staff.js to decide who
+// can manage whom.
+const ROLE_RANK = { employee: 0, sales: 1, admin: 2, super_admin: 3 };
+
+function roleAtLeast(role, minRole) {
+  if (!minRole) return true;
+  return (ROLE_RANK[role] ?? -1) >= (ROLE_RANK[minRole] ?? Infinity);
+}
+
 function bytesToHex(bytes) {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -215,4 +225,6 @@ export {
   bearerToken,
   getMyStaffAccount,
   updateMyStaffAccount,
+  ROLE_RANK,
+  roleAtLeast,
 };
