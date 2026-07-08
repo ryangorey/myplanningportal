@@ -249,6 +249,9 @@ async function updateBooking(request, env, id, json) {
     "allow_full_payment",
     "allow_retainer_payment",
     "allow_custom_payment",
+    "allow_backdrop_selection",
+    "allow_template_selection",
+    "booth_type",
   ]) {
     if (key in body) {
       fields.push(`${key} = ?`);
