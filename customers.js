@@ -4,17 +4,17 @@
 // customers table (their own login/profile) lives in customer-auth.js.
 
 // GET /api/customers?search=<text> -- staff only. Simple substring search
-// across name/email/phone so staff can find someone fast when starting a
-// new booking.
+// across name/email/phone/organization so staff can find someone fast when
+// starting a new booking.
 async function listCustomers(env, url, json) {
   const search = (url.searchParams.get("search") || "").trim();
 
-  let query = "SELECT id, email, phone, first_name, last_name, created_at FROM customers";
+  let query = "SELECT id, email, phone, first_name, last_name, organization, created_at FROM customers";
   const params = [];
   if (search) {
-    query += " WHERE email LIKE ? OR phone LIKE ? OR first_name LIKE ? OR last_name LIKE ?";
+    query += " WHERE email LIKE ? OR phone LIKE ? OR first_name LIKE ? OR last_name LIKE ? OR organization LIKE ?";
     const like = `%${search}%`;
-    params.push(like, like, like, like);
+    params.push(like, like, like, like, like);
   }
   query += " ORDER BY COALESCE(last_name, ''), COALESCE(first_name, ''), email";
 
@@ -23,10 +23,11 @@ async function listCustomers(env, url, json) {
 }
 
 // GET /api/customers/:id -- staff only. Includes their booking history so
-// staff can see past events for this client right alongside their contact info.
+// staff can see past AND upcoming events for this client right alongside
+// their contact info -- the frontend splits this list by event_date.
 async function getCustomer(env, id, json) {
   const customer = await env.DB.prepare(
-    "SELECT id, email, phone, first_name, last_name, created_at FROM customers WHERE id = ?"
+    "SELECT id, email, phone, first_name, last_name, organization, created_at FROM customers WHERE id = ?"
   )
     .bind(id)
     .first();
@@ -61,12 +62,22 @@ async function createCustomer(request, env, json) {
   }
 
   const result = await env.DB.prepare(
-    "INSERT INTO customers (email, phone, first_name, last_name) VALUES (?, ?, ?, ?)"
+    "INSERT INTO customers (email, phone, first_name, last_name, organization) VALUES (?, ?, ?, ?, ?)"
   )
-    .bind(email, body.phone ?? null, body.first_name ?? null, body.last_name ?? null)
+    .bind(email, body.phone ?? null, body.first_name ?? null, body.last_name ?? null, body.organization ?? null)
     .run();
 
-  return json({ id: result.meta.last_row_id, email, phone: body.phone ?? null, first_name: body.first_name ?? null, last_name: body.last_name ?? null }, 201);
+  return json(
+    {
+      id: result.meta.last_row_id,
+      email,
+      phone: body.phone ?? null,
+      first_name: body.first_name ?? null,
+      last_name: body.last_name ?? null,
+      organization: body.organization ?? null,
+    },
+    201
+  );
 }
 
 // PATCH /api/customers/:id -- staff only. Edits saved contact info.
@@ -76,7 +87,7 @@ async function updateCustomer(request, env, id, json) {
 
   const fields = [];
   const values = [];
-  for (const key of ["email", "phone", "first_name", "last_name"]) {
+  for (const key of ["email", "phone", "first_name", "last_name", "organization"]) {
     if (key in body) {
       fields.push(`${key} = ?`);
       values.push(key === "email" && body.email ? body.email.toLowerCase().trim() : body[key]);
