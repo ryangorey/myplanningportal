@@ -17,21 +17,43 @@ function canManageTask(actorId, actorRole, task) {
   return false;
 }
 
-// GET /api/tasks -- every task assigned to the logged-in staffer. The
-// frontend splits this into "Upcoming" (pending) and "Completed" sections
-// and sorts each side client-side, so this just returns everything.
+// GET /api/tasks -- every task assigned to the logged-in staffer, plus the
+// client it's for (if any). The frontend splits this into "Upcoming"
+// (pending) and "Completed" sections and sorts each side client-side, so
+// this just returns everything.
 async function listMyTasks(env, staffId, json) {
   const { results } = await env.DB.prepare(
-    `SELECT id, title, notes, due_date, status, assigned_to, created_by, booking_id, completed_at, created_at
-     FROM tasks WHERE assigned_to = ?
-     ORDER BY due_date IS NULL, due_date ASC, created_at DESC`
+    `SELECT t.id, t.title, t.notes, t.due_date, t.status, t.assigned_to, t.created_by,
+            t.booking_id, t.customer_id, t.completed_at, t.created_at,
+            c.first_name AS customer_first_name, c.last_name AS customer_last_name, c.email AS customer_email
+     FROM tasks t
+     LEFT JOIN customers c ON c.id = t.customer_id
+     WHERE t.assigned_to = ?
+     ORDER BY t.due_date IS NULL, t.due_date ASC, t.created_at DESC`
   )
     .bind(staffId)
     .all();
   return json(results);
 }
 
-// POST /api/tasks  { title, notes?, due_date?, assigned_to?, booking_id? }
+// GET /api/customers/:id/tasks -- every task tied to a client, regardless
+// of who it's assigned to. Powers the "Assigned tasks" section on that
+// client's detail panel. Sales+ only, same bar as seeing the client at all.
+async function listTasksForCustomer(env, customerId, json) {
+  const { results } = await env.DB.prepare(
+    `SELECT t.id, t.title, t.notes, t.due_date, t.status, t.assigned_to, t.created_by, t.completed_at, t.created_at,
+            s.first_name AS assignee_first_name, s.last_name AS assignee_last_name, s.email AS assignee_email
+     FROM tasks t
+     LEFT JOIN staff s ON s.id = t.assigned_to
+     WHERE t.customer_id = ?
+     ORDER BY t.due_date IS NULL, t.due_date ASC, t.created_at DESC`
+  )
+    .bind(customerId)
+    .all();
+  return json(results);
+}
+
+// POST /api/tasks  { title, notes?, due_date?, assigned_to?, booking_id?, customer_id? }
 // assigned_to defaults to yourself; passing someone else's id needs admin+.
 async function createTask(request, env, actorId, actorRole, json) {
   const body = await request.json().catch(() => null);
@@ -50,15 +72,22 @@ async function createTask(request, env, actorId, actorRole, json) {
     if (!target) return json({ error: "That staff member doesn't exist." }, 400);
   }
 
+  let customerId = null;
+  if (body.customer_id) {
+    const customer = await env.DB.prepare("SELECT id FROM customers WHERE id = ?").bind(body.customer_id).first();
+    if (!customer) return json({ error: "That client doesn't exist." }, 400);
+    customerId = Number(body.customer_id);
+  }
+
   const result = await env.DB.prepare(
-    `INSERT INTO tasks (title, notes, due_date, assigned_to, created_by, booking_id, status)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending')`
+    `INSERT INTO tasks (title, notes, due_date, assigned_to, created_by, booking_id, customer_id, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`
   )
-    .bind(body.title.trim(), body.notes ?? null, body.due_date ?? null, assignedTo, actorId, body.booking_id ?? null)
+    .bind(body.title.trim(), body.notes ?? null, body.due_date ?? null, assignedTo, actorId, body.booking_id ?? null, customerId)
     .run();
 
   return json(
-    { id: result.meta.last_row_id, title: body.title.trim(), status: "pending", assigned_to: assignedTo },
+    { id: result.meta.last_row_id, title: body.title.trim(), status: "pending", assigned_to: assignedTo, customer_id: customerId },
     201
   );
 }
@@ -85,6 +114,17 @@ async function updateTask(request, env, id, actorId, actorRole, json) {
   }
   if ("notes" in body) { fields.push("notes = ?"); values.push(body.notes); }
   if ("due_date" in body) { fields.push("due_date = ?"); values.push(body.due_date); }
+  if ("customer_id" in body) {
+    if (body.customer_id) {
+      const customer = await env.DB.prepare("SELECT id FROM customers WHERE id = ?").bind(body.customer_id).first();
+      if (!customer) return json({ error: "That client doesn't exist." }, 400);
+      fields.push("customer_id = ?");
+      values.push(Number(body.customer_id));
+    } else {
+      fields.push("customer_id = ?");
+      values.push(null);
+    }
+  }
   if ("status" in body) {
     if (!VALID_STATUSES.includes(body.status)) return json({ error: "That's not a valid status." }, 400);
     fields.push("status = ?");
@@ -110,4 +150,4 @@ async function deleteTask(env, id, actorId, actorRole, json) {
   return json({ ok: true });
 }
 
-export { listMyTasks, createTask, updateTask, deleteTask };
+export { listMyTasks, listTasksForCustomer, createTask, updateTask, deleteTask };
