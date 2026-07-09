@@ -151,16 +151,28 @@ async function getSessionStaff(request, env) {
   return row;
 }
 
-// GET /api/staff/me -- the logged-in staff member's own account info.
+// GET /api/staff/me -- the logged-in staff member's own account info,
+// including their personal Home-dashboard widget preferences (defaults to
+// everything on if they've never touched the Customize panel).
 async function getMyStaffAccount(request, env, json) {
   const staffRow = await getSessionStaff(request, env);
   if (!staffRow) return json({ error: "Sign in required." }, 401);
+
+  const prefsRow = await env.DB.prepare("SELECT dashboard_prefs FROM staff WHERE id = ?")
+    .bind(staffRow.id)
+    .first();
+  let dashboardPrefs = null;
+  if (prefsRow && prefsRow.dashboard_prefs) {
+    try { dashboardPrefs = JSON.parse(prefsRow.dashboard_prefs); } catch { dashboardPrefs = null; }
+  }
+
   return json({
     id: staffRow.id,
     email: staffRow.email,
     first_name: staffRow.first_name,
     last_name: staffRow.last_name,
     role: staffRow.role,
+    dashboard_prefs: dashboardPrefs || { calendar: true, tasks: true, bookings: true },
   });
 }
 
@@ -186,6 +198,14 @@ async function updateMyStaffAccount(request, env, json) {
   if ("email" in body && body.email) {
     fields.push("email = ?");
     values.push(body.email.toLowerCase().trim());
+  }
+  if ("dashboard_prefs" in body && body.dashboard_prefs && typeof body.dashboard_prefs === "object") {
+    fields.push("dashboard_prefs = ?");
+    values.push(JSON.stringify({
+      calendar: !!body.dashboard_prefs.calendar,
+      tasks: !!body.dashboard_prefs.tasks,
+      bookings: !!body.dashboard_prefs.bookings,
+    }));
   }
 
   if (body.new_password) {
