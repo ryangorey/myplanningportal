@@ -12,6 +12,7 @@ const VERIFY_TTL_MINUTES = 60 * 24; // 24 hours -- this is a one-time signup
 // the old magic link's window was.
 const SESSION_TTL_DAYS = 30; // customers shouldn't get logged out mid-planning
 const RESEND_COOLDOWN_SECONDS = 60; // don't let someone spam an inbox
+const STAFF_LINK_TTL_YEARS = 50; // effectively no expiration -- see createStaffLoginLink
 
 function bytesToHex(bytes) {
   return Array.from(bytes)
@@ -32,6 +33,12 @@ function minutesFromNow(mins) {
 function daysFromNow(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
+  return d.toISOString();
+}
+
+function yearsFromNow(years) {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() + years);
   return d.toISOString();
 }
 
@@ -228,6 +235,43 @@ async function resendVerification(request, env, json) {
   return json(genericResponse);
 }
 
+// POST /api/customers/:id/login-link -- staff only (sales+, already gated
+// by the "customers" resource block in worker-index.js before this ever
+// runs). Generates a one-time sign-in link staff can copy and hand a
+// customer directly -- a call, a text, whatever -- instead of the customer
+// needing to know their password. Deliberately reuses the exact same
+// customer_login_tokens table and /api/auth/customer-verify-email
+// consumption path as the normal email-confirmation link: clicking it logs
+// the customer straight in AND marks their email verified, which is what
+// you want here too -- if staff trust this customer enough to hand them
+// instant access, there's no reason to leave them stuck behind the "confirm
+// your email first" wall on their next password login. The only real
+// difference from a signup link is where the token comes from and how long
+// it's good for: staff-issued links don't expire (pushed out 50 years,
+// rather than making expires_at nullable for one edge case) since there's
+// no inbox-delivery deadline to race against -- but they're still
+// single-use once clicked, same as always.
+async function createStaffLoginLink(request, env, customerId, json) {
+  const customer = await env.DB.prepare(
+    "SELECT id, email, first_name, last_name FROM customers WHERE id = ?"
+  )
+    .bind(customerId)
+    .first();
+  if (!customer) return json({ error: "Client not found." }, 404);
+
+  const token = newToken();
+  await env.DB.prepare(
+    "INSERT INTO customer_login_tokens (token, customer_id, expires_at) VALUES (?, ?, ?)"
+  )
+    .bind(token, customerId, yearsFromNow(STAFF_LINK_TTL_YEARS))
+    .run();
+
+  return json(
+    { token, customer: { id: customer.id, email: customer.email, first_name: customer.first_name, last_name: customer.last_name } },
+    201
+  );
+}
+
 // POST /api/auth/customer-login  { email, password } -> { token, customer }
 async function login(request, env, json) {
   const body = await request.json().catch(() => null);
@@ -346,4 +390,5 @@ export {
   getSessionCustomer,
   getMe,
   getMyBookings,
+  createStaffLoginLink,
 };
