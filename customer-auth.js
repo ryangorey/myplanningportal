@@ -48,25 +48,41 @@ function bearerToken(request) {
 // and env.EMAIL_FROM (e.g. "myplanningportal <login@myplanningportal.com>").
 // Only used at signup time now, for the one-time "confirm your email" step
 // -- routine logins never touch this.
+//
+// Deliberately never throws: a Resend-side problem (revoked API key,
+// domain verification lapsed, account suspended, rate limited, network
+// blip) should never take down signup itself. The customer's account row
+// is already committed to D1 by the time this runs, so if the email fails
+// to send, the account still exists -- they can retry via "Didn't get a
+// confirmation email?" once Resend is working again. Letting this throw
+// used to mean a Resend outage turned into a hard failure on every signup
+// and every resend-verification request, not just a missing email.
 // ---------------------------------------------------------------------------
 async function sendEmail(env, { to, subject, html }) {
   if (!env.RESEND_API_KEY) {
     console.log(`[email not configured] would send to ${to}: ${subject}`);
-    return { skipped: true };
+    return { sent: false, reason: "not_configured" };
   }
-  const resp = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${env.RESEND_API_KEY}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ from: env.EMAIL_FROM, to, subject, html }),
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(`Email send failed (${resp.status}): ${text}`);
+  try {
+    const resp = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ from: env.EMAIL_FROM, to, subject, html }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      console.error(`Resend email send failed (${resp.status}) to ${to}: ${text}`);
+      return { sent: false, reason: `resend_${resp.status}` };
+    }
+    return { sent: true };
+  } catch (err) {
+    // Network failure talking to Resend at all (DNS, timeout, etc.).
+    console.error(`Resend email send threw for ${to}:`, err);
+    return { sent: false, reason: "network_error" };
   }
-  return { skipped: false };
 }
 
 function verifyEmailHtml(link) {
@@ -302,14 +318,16 @@ async function getMyBookings(request, env, json) {
   if (!customer) return json({ error: "Sign in required." }, 401);
 
   const { results } = await env.DB.prepare(
-    `SELECT b.id, b.event_date, b.event_type, b.status, b.package_total, b.deposit_paid,
+    `SELECT b.id, b.event_date, b.event_type, b.status, b.package_total, b.deposit_paid, b.notes,
             b.allow_full_payment, b.allow_retainer_payment, b.allow_custom_payment,
             b.allow_backdrop_selection, b.allow_template_selection, b.booth_type,
-            b.backdrop_choice, b.template_choice,
-            br.slug AS brand_slug, br.display_name AS brand_name, p.name AS package_name
+            b.backdrop_choice, b.template_choice, b.contract_url,
+            br.slug AS brand_slug, br.display_name AS brand_name, p.name AS package_name,
+            v.name AS venue_name, v.address AS venue_address, v.city AS venue_city, v.state AS venue_state
      FROM bookings b
      JOIN brands br ON br.id = b.brand_id
      LEFT JOIN packages p ON p.id = b.package_id
+     LEFT JOIN venues v ON v.id = b.venue_id
      WHERE b.customer_id = ?
      ORDER BY b.event_date DESC`
   )
