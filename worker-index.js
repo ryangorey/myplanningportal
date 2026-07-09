@@ -4,7 +4,8 @@
 // auth from auth.js protecting the write routes.
 
 import { login, logout, getSessionStaff, getMyStaffAccount, updateMyStaffAccount, roleAtLeast } from "./auth.js";
-import { getAvailability, createBooking, listBookings, getBooking, updateBooking } from "./bookings.js";
+import { getAvailability, createBooking, listBookings, getBooking, updateBooking, uploadBookingContract } from "./bookings.js";
+import { listMessagesForBooking, createMessage } from "./messages.js";
 import { signup, login as customerLogin, verifyEmail, resendVerification, logoutCustomer, getMe, getMyBookings } from "./customer-auth.js";
 import { setupPage, submitSetup } from "./setup.js";
 import { createPayment } from "./payments.js";
@@ -521,6 +522,23 @@ export default {
       // own action on their own booking, not a staff one.
       if (request.method === "POST" && id && subresource === "selection") {
         return addCors(await saveSelection(request, env, id, json));
+      }
+
+      // Messages: either the customer (their own booking only) or any
+      // signed-in staffer. messages.js sorts out which kind of caller this
+      // is and checks ownership itself, so this has to run before the
+      // staff-only auth gate below would otherwise reject a customer.
+      if (id && subresource === "messages") {
+        if (request.method === "GET") return addCors(await listMessagesForBooking(request, env, id, json));
+        if (request.method === "POST") return addCors(await createMessage(request, env, id, json));
+      }
+
+      // Uploading a signed contract is a staff action -- sales+, same bar
+      // as editing the booking itself.
+      if (id && subresource === "contract" && request.method === "POST") {
+        const contractAuth = await requireStaffAdmin(request, env, "sales");
+        if (contractAuth.error) return addCors(contractAuth.error);
+        return addCors(await uploadBookingContract(request, env, id, json));
       }
 
       // Any active staff role, including employee, can view bookings and
