@@ -122,10 +122,16 @@ async function createBooking(request, env, json) {
 }
 
 // GET /api/bookings -- staff only. Filterable list across all brands.
+// upcoming=1 flips this from "browse everything" (newest first) to "what's
+// coming up" (soonest first, cancelled bookings excluded) -- used by the
+// Calendar widget on the staff Home dashboard. limit caps the row count for
+// that same widget so it stays a short glanceable list, not a full table.
 async function listBookings(env, url, json) {
   const date = url.searchParams.get("date");
   const brandSlug = url.searchParams.get("brand");
   const status = url.searchParams.get("status");
+  const upcoming = url.searchParams.get("upcoming");
+  const limitParam = url.searchParams.get("limit");
 
   let query = `SELECT b.id, b.event_date, b.event_type, b.status, b.package_total, b.deposit_paid,
                       br.slug AS brand_slug, br.display_name AS brand_name,
@@ -149,7 +155,15 @@ async function listBookings(env, url, json) {
     query += " AND b.status = ?";
     params.push(status);
   }
-  query += " ORDER BY b.event_date DESC";
+  if (upcoming) {
+    query += " AND b.event_date >= date('now') AND b.status != 'cancelled'";
+  }
+  query += upcoming ? " ORDER BY b.event_date ASC" : " ORDER BY b.event_date DESC";
+  if (limitParam) {
+    const n = Math.max(1, Math.min(50, Number(limitParam) || 10));
+    query += " LIMIT ?";
+    params.push(n);
+  }
 
   const { results } = await env.DB.prepare(query).bind(...params).all();
   return json(results);
