@@ -6,7 +6,7 @@
 import { login, logout, getSessionStaff, getMyStaffAccount, updateMyStaffAccount, roleAtLeast } from "./auth.js";
 import { getAvailability, createBooking, listBookings, getBooking, updateBooking, uploadBookingContract } from "./bookings.js";
 import { listMessagesForBooking, createMessage } from "./messages.js";
-import { signup, login as customerLogin, verifyEmail, resendVerification, logoutCustomer, getMe, getMyBookings } from "./customer-auth.js";
+import { signup, login as customerLogin, verifyEmail, resendVerification, logoutCustomer, getMe, getMyBookings, createStaffLoginLink } from "./customer-auth.js";
 import { setupPage, submitSetup } from "./setup.js";
 import { createPayment } from "./payments.js";
 import { saveSelection } from "./selections.js";
@@ -420,6 +420,7 @@ export default {
       if (request.method === "GET" && id && subresource === "tasks") return addCors(await listTasksForCustomer(env, id, json));
       if (request.method === "GET" && id && subresource === "contacts") return addCors(await listContactsForCustomer(env, id, json));
       if (request.method === "POST" && id && subresource === "contacts") return addCors(await createContact(request, env, id, auth.staff.id, json));
+      if (request.method === "POST" && id && subresource === "login-link") return addCors(await createStaffLoginLink(request, env, id, json));
       if (request.method === "GET" && !id) return addCors(await listCustomers(env, url, json));
       if (request.method === "GET" && id && !subresource) return addCors(await getCustomer(env, id, json));
       if (request.method === "POST" && !id) return addCors(await createCustomer(request, env, json));
