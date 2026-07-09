@@ -11,7 +11,8 @@ import { createPayment } from "./payments.js";
 import { saveSelection } from "./selections.js";
 import { listCustomers, getCustomer, createCustomer, updateCustomer } from "./customers.js";
 import { listStaff, createStaff, updateStaff, deactivateStaff } from "./staff.js";
-import { updateBrand, uploadBrandLogo, serveUpload } from "./branding.js";
+import { createBrand, updateBrand, deleteBrand, uploadBrandLogo, serveUpload } from "./branding.js";
+import { listMyTasks, createTask, updateTask, deleteTask } from "./tasks.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -325,9 +326,16 @@ export default {
 
     // Brands: public read (used by admin screens for dropdowns, and by the
     // customer portal for branding). Editing name/color and uploading a
-    // logo are admin+ only.
+    // logo are admin+ only. Adding or deleting a brand outright is
+    // super_admin only -- that's a structural change to the whole system,
+    // not routine day-to-day branding upkeep.
     if (resource === "brands") {
       if (request.method === "GET" && !id) return addCors(await listBrands(env));
+      if (!id && request.method === "POST") {
+        const auth = await requireStaffAdmin(request, env, "super_admin");
+        if (auth.error) return addCors(auth.error);
+        return addCors(await createBrand(request, env, json));
+      }
       if (id && subresource === "logo" && request.method === "POST") {
         const auth = await requireStaffAdmin(request, env, "admin");
         if (auth.error) return addCors(auth.error);
@@ -337,6 +345,11 @@ export default {
         const auth = await requireStaffAdmin(request, env, "admin");
         if (auth.error) return addCors(auth.error);
         return addCors(await updateBrand(request, env, id, json));
+      }
+      if (id && !subresource && request.method === "DELETE") {
+        const auth = await requireStaffAdmin(request, env, "super_admin");
+        if (auth.error) return addCors(auth.error);
+        return addCors(await deleteBrand(env, id, json));
       }
       return addCors(json({ error: "Not found." }, 404));
     }
@@ -367,6 +380,19 @@ export default {
       if (request.method === "POST" && !id) return addCors(await createStaff(request, env, auth.staff.role, json));
       if (request.method === "PATCH" && id) return addCors(await updateStaff(request, env, id, auth.staff.id, auth.staff.role, json));
       if (request.method === "DELETE" && id) return addCors(await deactivateStaff(env, id, auth.staff.id, auth.staff.role, json));
+      return addCors(json({ error: "Not found." }, 404));
+    }
+
+    // Tasks: personal to-do list powering the Home dashboard's Tasks
+    // widget. Any signed-in staffer can manage their own tasks; assigning
+    // one to someone else needs admin+ (see tasks.js for the full rule).
+    if (resource === "tasks") {
+      const auth = await requireStaffAdmin(request, env);
+      if (auth.error) return addCors(auth.error);
+      if (request.method === "GET" && !id) return addCors(await listMyTasks(env, auth.staff.id, json));
+      if (request.method === "POST" && !id) return addCors(await createTask(request, env, auth.staff.id, auth.staff.role, json));
+      if (request.method === "PATCH" && id) return addCors(await updateTask(request, env, id, auth.staff.id, auth.staff.role, json));
+      if (request.method === "DELETE" && id) return addCors(await deleteTask(env, id, auth.staff.id, auth.staff.role, json));
       return addCors(json({ error: "Not found." }, 404));
     }
 
