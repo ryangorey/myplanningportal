@@ -52,6 +52,58 @@ async function updateBrand(request, env, id, json) {
   return json(brand);
 }
 
+// POST /api/brands  { slug, display_name, portal_domain? } -- super_admin
+// only. slug gets normalized to lowercase letters/numbers/dashes so it's
+// always safe to use in URLs and as the brand_slug bookings are created
+// against.
+async function createBrand(request, env, json) {
+  const body = await request.json().catch(() => null);
+  if (!body || !body.slug || !body.slug.trim() || !body.display_name || !body.display_name.trim()) {
+    return json({ error: "Slug and display name are required." }, 400);
+  }
+
+  const slug = body.slug.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!slug) return json({ error: "That slug isn't valid -- use letters, numbers, and dashes." }, 400);
+
+  const existing = await env.DB.prepare("SELECT id FROM brands WHERE slug = ?").bind(slug).first();
+  if (existing) return json({ error: "A brand with that slug already exists." }, 409);
+
+  const result = await env.DB.prepare(
+    "INSERT INTO brands (slug, display_name, portal_domain) VALUES (?, ?, ?)"
+  )
+    .bind(slug, body.display_name.trim(), body.portal_domain || null)
+    .run();
+
+  const brand = await env.DB.prepare(
+    "SELECT id, slug, display_name, portal_domain, logo_url, primary_color FROM brands WHERE id = ?"
+  )
+    .bind(result.meta.last_row_id)
+    .first();
+  return json(brand, 201);
+}
+
+// DELETE /api/brands/:id -- super_admin only. Refuses if any booking still
+// points at this brand: several listing queries INNER JOIN bookings to
+// brands, so an orphaned brand_id wouldn't error, it would just make those
+// bookings silently vanish from every list. Safer to block the delete and
+// make the admin deal with those bookings (reassign or remove) first.
+async function deleteBrand(env, id, json) {
+  const brand = await env.DB.prepare("SELECT id, slug FROM brands WHERE id = ?").bind(id).first();
+  if (!brand) return json({ error: "Brand not found." }, 404);
+
+  if (["rgml", "grinbear", "myplanningportal"].includes(brand.slug)) {
+    return json({ error: "That's one of the core brands this system runs on -- it can't be deleted." }, 400);
+  }
+
+  const inUse = await env.DB.prepare("SELECT COUNT(*) AS n FROM bookings WHERE brand_id = ?").bind(id).first();
+  if (inUse && inUse.n > 0) {
+    return json({ error: `Can't delete this brand -- it still has ${inUse.n} booking(s) on it.` }, 409);
+  }
+
+  await env.DB.prepare("DELETE FROM brands WHERE id = ?").bind(id).run();
+  return json({ ok: true });
+}
+
 // POST /api/brands/:id/logo -- admin+ only. Body is the raw image bytes;
 // content-type header identifies the format. Not multipart/form-data --
 // the browser sends the File object directly as the request body.
@@ -103,4 +155,4 @@ async function serveUpload(env, key) {
   return new Response(object.body, { headers });
 }
 
-export { updateBrand, uploadBrandLogo, serveUpload };
+export { createBrand, updateBrand, deleteBrand, uploadBrandLogo, serveUpload };
