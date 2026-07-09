@@ -134,6 +134,7 @@ async function listLeads(env, url, json) {
                       l.customer_id, c.first_name AS customer_first_name, c.last_name AS customer_last_name,
                       l.stage_id, l.first_name, l.last_name, l.email, l.phone, l.organization,
                       l.event_date, l.estimated_value, l.source, l.notes, l.assigned_to,
+                      l.converted_booking_id,
                       s.first_name AS assignee_first_name, s.last_name AS assignee_last_name,
                       l.created_at, l.updated_at
                FROM leads l
@@ -282,6 +283,20 @@ async function updateLead(request, env, id, json) {
       values.push(Number(body.assigned_to));
     } else {
       fields.push("assigned_to = ?");
+      values.push(null);
+    }
+  }
+  // Set once a lead becomes a real booking (see POST /api/bookings, called
+  // from the "Convert to booking" button) -- kept separate from the free-text
+  // field loop below so a bogus booking id can't silently get stored.
+  if ("converted_booking_id" in body) {
+    if (body.converted_booking_id) {
+      const booking = await env.DB.prepare("SELECT id FROM bookings WHERE id = ?").bind(body.converted_booking_id).first();
+      if (!booking) return json({ error: "That booking doesn't exist." }, 400);
+      fields.push("converted_booking_id = ?");
+      values.push(Number(body.converted_booking_id));
+    } else {
+      fields.push("converted_booking_id = ?");
       values.push(null);
     }
   }
