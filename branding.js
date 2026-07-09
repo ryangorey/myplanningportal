@@ -87,17 +87,34 @@ async function createBrand(request, env, json) {
 // brands, so an orphaned brand_id wouldn't error, it would just make those
 // bookings silently vanish from every list. Safer to block the delete and
 // make the admin deal with those bookings (reassign or remove) first.
+//
+// RGML Entertainment ('rgml') is the primary brand this whole system is
+// built around and can never be deleted. Grin + Bear Booth and
+// myplanningportal are deletable like any other brand -- deleting
+// 'myplanningportal' specifically just means the admin topbar and customer
+// portal login/dashboard fall back to their hardcoded default logo/colors
+// until a new brand is set up (nothing crashes, it just stops being
+// custom-branded).
 async function deleteBrand(env, id, json) {
   const brand = await env.DB.prepare("SELECT id, slug FROM brands WHERE id = ?").bind(id).first();
   if (!brand) return json({ error: "Brand not found." }, 404);
 
-  if (["rgml", "grinbear", "myplanningportal"].includes(brand.slug)) {
-    return json({ error: "That's one of the core brands this system runs on -- it can't be deleted." }, 400);
+  if (brand.slug === "rgml") {
+    return json({ error: "RGML Entertainment is the primary brand this system runs on -- it can't be deleted." }, 400);
   }
 
-  const inUse = await env.DB.prepare("SELECT COUNT(*) AS n FROM bookings WHERE brand_id = ?").bind(id).first();
-  if (inUse && inUse.n > 0) {
-    return json({ error: `Can't delete this brand -- it still has ${inUse.n} booking(s) on it.` }, 409);
+  const bookingsInUse = await env.DB.prepare("SELECT COUNT(*) AS n FROM bookings WHERE brand_id = ?").bind(id).first();
+  if (bookingsInUse && bookingsInUse.n > 0) {
+    return json({ error: `Can't delete this brand -- it still has ${bookingsInUse.n} booking(s) on it.` }, 409);
+  }
+
+  // Packages reference brands too (brand_id), and the FK would otherwise
+  // fail the DELETE outright with a raw SQL error instead of a clean
+  // message. A brand almost always has at least its starter packages, so
+  // this check matters in practice, not just in theory.
+  const packagesInUse = await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE brand_id = ?").bind(id).first();
+  if (packagesInUse && packagesInUse.n > 0) {
+    return json({ error: `Can't delete this brand -- it still has ${packagesInUse.n} package(s) tied to it. Delete or reassign those first.` }, 409);
   }
 
   await env.DB.prepare("DELETE FROM brands WHERE id = ?").bind(id).run();
